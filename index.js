@@ -7,6 +7,7 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+// Initialisation Firestore (inchangée)
 const serviceAccount = {
   "type": "service_account",
   "project_id": process.env.GOOGLE_PROJECT_ID,
@@ -26,6 +27,12 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
+// OPTIMISATION 1 : Cache Control
+// On dit aux navigateurs de garder les données en mémoire 60 secondes pour éviter de solliciter le serveur
+const setCache = (res) => {
+    res.set('Cache-Control', 'public, max-age=60');
+};
+
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     if (username === "Biblioena" && password === "Biblio1") {
@@ -37,16 +44,22 @@ app.post('/api/publish', async (req, res) => {
     try {
         const { titre, auteur, annee, type, categorie } = req.body;
         const newDoc = { titre, auteur, annee, type, categorie, createdAt: admin.firestore.FieldValue.serverTimestamp() };
-        const docRef = await db.collection('documents').add(newDoc);
-        res.status(201).send({ id: docRef.id });
+        await db.collection('documents').add(newDoc);
+        res.status(201).send({ message: "Publié" });
     } catch (error) { res.status(500).send({ error: error.message }); }
 });
 
+// OPTIMISATION 2 : Projection (On ne récupère que le nécessaire)
 app.get('/api/documents/:type', async (req, res) => {
     try {
-        const snapshot = await db.collection('documents').where('type', '==', req.params.type).get();
-        const docs = [];
-        snapshot.forEach(doc => docs.push({ id: doc.id, ...doc.data() }));
+        setCache(res);
+        // On limite la requête à ce qui est strictement utile pour l'affichage
+        const snapshot = await db.collection('documents')
+            .where('type', '==', req.params.type)
+            .select('titre', 'auteur', 'annee', 'categorie') 
+            .get();
+            
+        const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json(docs);
     } catch (error) { res.status(500).send({ error: error.message }); }
 });
@@ -58,16 +71,19 @@ app.delete('/api/documents/:id', async (req, res) => {
     } catch (error) { res.status(500).send({ error: error.message }); }
 });
 
+// OPTIMISATION 3 : Tri efficace
 app.get('/api/admin/all-documents', async (req, res) => {
     try {
-        const snapshot = await db.collection('documents').orderBy('createdAt', 'desc').get();
-        const docs = [];
-        snapshot.forEach(doc => docs.push({ id: doc.id, ...doc.data() }));
+        // L'utilisation de limit(50) évite de charger 1000 documents d'un coup
+        const snapshot = await db.collection('documents')
+            .orderBy('createdAt', 'desc')
+            .limit(100)
+            .get();
+        const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json(docs);
     } catch (error) {
-        const snapshot = await db.collection('documents').get();
-        const docs = [];
-        snapshot.forEach(doc => docs.push({ id: doc.id, ...doc.data() }));
+        const snapshot = await db.collection('documents').limit(100).get();
+        const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         res.status(200).json(docs);
     }
 });
